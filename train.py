@@ -24,9 +24,11 @@ class SimpleTrainer2d:
         iterations:int = 30000,
         model_path = None,
         args = None,
+        to_gray=False,
     ):
         self.device = torch.device("cuda:0")
-        self.gt_image = image_path_to_tensor(image_path).to(self.device)
+        self.gt_image = image_path_to_tensor(image_path, to_gray=to_gray).to(self.device)
+        self.channel_num = self.gt_image.shape[1]
 
         self.num_points = num_points
         image_path = Path(image_path)
@@ -39,7 +41,7 @@ class SimpleTrainer2d:
         
         if model_name == "GaussianImage_Cholesky":
             from gaussianimage_cholesky import GaussianImage_Cholesky
-            self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
+            self.gaussian_model = GaussianImage_Cholesky(loss_type="L2", opt_type="adan", channel_num=self.channel_num, num_points=self.num_points, H=self.H, W=self.W, BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W, 
                 device=self.device, lr=args.lr, quantize=False).to(self.device)
 
         elif model_name == "GaussianImage_RS":
@@ -107,8 +109,10 @@ class SimpleTrainer2d:
             img.save(str(self.log_dir / name))
         return psnr, ms_ssim_value
 
-def image_path_to_tensor(image_path: Path):
+def image_path_to_tensor(image_path: Path, to_gray=False):
     img = Image.open(image_path)
+    if to_gray:
+        img = img.convert('L')
     transform = transforms.ToTensor()
     img_tensor = transform(img).unsqueeze(0) #[1, C, H, W]
     return img_tensor

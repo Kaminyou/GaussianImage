@@ -8,6 +8,8 @@ import math
 from quantize import *
 from optimizer import Adan
 
+from pure import project_gaussians_2d_torch, rasterize_gaussians_sum_torch
+
 class GaussianImage_Cholesky(nn.Module):
     def __init__(self, loss_type="L2", **kwargs):
         super().__init__()
@@ -25,7 +27,8 @@ class GaussianImage_Cholesky(nn.Module):
         self._xyz = nn.Parameter(torch.atanh(2 * (torch.rand(self.init_num_points, 2) - 0.5)))
         self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 3))
         self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
-        self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 3))
+        self._features_dc = nn.Parameter(torch.rand(self.init_num_points, kwargs["channel_num"]))
+        self.channel_num = kwargs["channel_num"]
         self.last_size = (self.H, self.W)
         self.quantize = kwargs["quantize"]
         self.register_buffer('background', torch.ones(3))
@@ -65,11 +68,32 @@ class GaussianImage_Cholesky(nn.Module):
         return self._cholesky+self.cholesky_bound
 
     def forward(self):
-        self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
-        out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
-                self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        # self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
+        # out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
+        #         self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        xys, depths, radii, conics, num_tiles_hit = project_gaussians_2d_torch(
+            self.get_xyz,
+            self.get_cholesky_elements,
+            self.H,
+            self.W,
+            self.tile_bounds,
+        )
+
+        pix_coord = torch.stack(torch.meshgrid(torch.arange(self.W), torch.arange(self.H), indexing='xy'), dim=-1).to(xys.device)
+        out_img = rasterize_gaussians_sum_torch(
+            xys.contiguous(),
+            radii.contiguous(),
+            conics.contiguous(),
+            self.get_features.contiguous(),
+            self._opacity.contiguous(),
+            depths.contiguous(),
+            self.W,
+            self.H,
+            pix_coord.contiguous(),
+        )
+
         out_img = torch.clamp(out_img, 0, 1) #[H, W, 3]
-        out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
+        out_img = out_img.view(-1, self.H, self.W, self.channel_num).permute(0, 3, 1, 2).contiguous()
         return {"render": out_img}
 
     def train_iter(self, gt_image):

@@ -96,8 +96,8 @@ def rasterize_gaussians_sum_torch(
     rect = get_rect(means2D, radii, width=image_width, height=image_height)
 
     # pix_coord = torch.stack(torch.meshgrid(torch.arange(image_width), torch.arange(image_height), indexing='xy'), dim=-1).to(means2D.device) # mind
-    
-    render_color = torch.ones(*pix_coord.shape[:2], 3).to(means2D.device)
+    channel_num = color.shape[-1]
+    render_color = torch.ones(*pix_coord.shape[:2], channel_num).to(means2D.device)
     render_depth = torch.zeros(*pix_coord.shape[:2], 1).to(means2D.device)
     render_alpha = torch.zeros(*pix_coord.shape[:2], 1).to(means2D.device)
 
