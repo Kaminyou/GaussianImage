@@ -9,6 +9,7 @@ from quantize import *
 from optimizer import Adan
 
 from pure import project_gaussians_2d_torch, rasterize_gaussians_sum_torch
+from pure import project_gaussians_3d_torch, rasterize_gaussians_sum_3d_torch
 
 class GaussianImage_Cholesky(nn.Module):
     def __init__(self, loss_type="L2", **kwargs):
@@ -268,3 +269,105 @@ class GaussianImage_Cholesky(nn.Module):
         feature_dc_bpp = feature_dc_bits/self.H/self.W
         return {"bpp": bpp, "position_bpp": position_bpp, 
             "cholesky_bpp": cholesky_bpp, "feature_dc_bpp": feature_dc_bpp,}
+
+
+class GaussianImage_Cholesky3D(nn.Module):
+    def __init__(self, loss_type="L2", **kwargs):
+        super().__init__()
+        self.loss_type = loss_type
+        self.init_num_points = kwargs["num_points"]
+        self.C, self.H, self.W = kwargs["C"], kwargs["H"], kwargs["W"]
+        self.BLOCK_C, self.BLOCK_W, self.BLOCK_H = kwargs["BLOCK_C"], kwargs["BLOCK_W"], kwargs["BLOCK_H"]
+        self.tile_bounds = (
+            (self.C + self.BLOCK_C - 1) // self.BLOCK_C,
+            (self.W + self.BLOCK_W - 1) // self.BLOCK_W,
+            (self.H + self.BLOCK_H - 1) // self.BLOCK_H,
+            1,
+        ) # 
+        self.device = kwargs["device"]
+
+        self._xyz = nn.Parameter(torch.atanh(2 * (torch.rand(self.init_num_points, 3) - 0.5)))
+        self._cholesky = nn.Parameter(torch.rand(self.init_num_points, 6))
+        self.register_buffer('_opacity', torch.ones((self.init_num_points, 1)))
+        self._features_dc = nn.Parameter(torch.rand(self.init_num_points, 1))
+        self.last_size = (self.C, self.H, self.W)
+        self.register_buffer('background', torch.ones(1))
+        self.opacity_activation = torch.sigmoid
+        self.rgb_activation = torch.sigmoid
+        self.register_buffer('bound', torch.tensor([0.5, 0.5]).view(1, 2))
+        self.register_buffer('cholesky_bound', torch.tensor([0.5, 0, 0.5, 0, 0, 0.5]).view(1, 6))
+
+        if kwargs["opt_type"] == "adam":
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=kwargs["lr"])
+        else:
+            self.optimizer = Adan(self.parameters(), lr=kwargs["lr"])
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20000, gamma=0.5)
+
+    @property
+    def get_xyz(self):
+        return torch.tanh(self._xyz)
+    
+    @property
+    def get_features(self):
+        return self._features_dc
+    
+    @property
+    def get_opacity(self):
+        return self._opacity
+
+    @property
+    def get_cholesky_elements(self):
+        return self._cholesky+self.cholesky_bound
+
+    def forward(self):
+        # self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
+        # out_img = rasterize_gaussians_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
+        #         self.get_features, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, background=self.background, return_alpha=False)
+        xys, depths, radii, conics, num_tiles_hit = project_gaussians_3d_torch(
+            self.get_xyz,
+            self.get_cholesky_elements,
+            self.H,
+            self.W,
+            self.C,
+            self.tile_bounds,
+        )
+
+        pix_coord = torch.stack(
+            torch.meshgrid(
+                torch.arange(self.W),
+                torch.arange(self.H),
+                torch.arange(self.C),
+            ),
+            dim=-1,
+        ).to(xys.device)
+
+        out_img = rasterize_gaussians_sum_3d_torch(
+            xys.contiguous(),
+            radii.contiguous(),
+            conics.contiguous(),
+            self.get_features.contiguous(),
+            self._opacity.contiguous(),
+            depths.contiguous(),
+            self.W,
+            self.H,
+            self.C,
+            pix_coord.contiguous(),
+        )
+
+        out_img = torch.clamp(out_img, 0, 1)  # [W, H, C]
+        out_img = out_img.view(-1, self.W, self.H, self.C).permute(0, 3, 2, 1).contiguous()  # [1, C, H, W]
+        return {"render": out_img}
+
+    def train_iter(self, gt_image):
+        render_pkg = self.forward()
+        image = render_pkg["render"]
+        loss = loss_fn(image, gt_image, self.loss_type, lambda_value=0.7)
+        loss.backward()
+        with torch.no_grad():
+            mse_loss = F.mse_loss(image, gt_image)
+            psnr = 10 * math.log10(1.0 / mse_loss.item())
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none = True)
+
+        self.scheduler.step()
+        return loss, psnr
